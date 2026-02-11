@@ -1,11 +1,13 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { supabase } from "@/lib/supabase";
 
 type Todo = {
   id: number;
   text: string;
   completed: boolean;
+  position: number;
 };
 
 type Filter = "all" | "active" | "completed";
@@ -20,43 +22,83 @@ export default function Home() {
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const dragNode = useRef<HTMLLIElement | null>(null);
 
-  // LocalStorage から読み込み
-  useEffect(() => {
-    const savedTodos = localStorage.getItem("todos");
-    const savedDarkMode = localStorage.getItem("darkMode");
-    if (savedTodos) setTodos(JSON.parse(savedTodos));
-    if (savedDarkMode) setDarkMode(JSON.parse(savedDarkMode));
-    setIsLoaded(true);
+  // Supabase からデータを読み込み
+  const fetchTodos = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("todos")
+      .select("*")
+      .order("position", { ascending: true });
+
+    if (error) {
+      console.error("Failed to fetch todos:", error);
+      return;
+    }
+    if (data) setTodos(data);
   }, []);
 
-  // LocalStorage に保存
+  // 初回読み込み
   useEffect(() => {
-    if (!isLoaded) return;
-    localStorage.setItem("todos", JSON.stringify(todos));
-  }, [todos, isLoaded]);
+    const savedDarkMode = localStorage.getItem("darkMode");
+    if (savedDarkMode) setDarkMode(JSON.parse(savedDarkMode));
 
+    fetchTodos().then(() => setIsLoaded(true));
+  }, [fetchTodos]);
+
+  // ダークモードだけ LocalStorage に保存
   useEffect(() => {
     if (!isLoaded) return;
     localStorage.setItem("darkMode", JSON.stringify(darkMode));
   }, [darkMode, isLoaded]);
 
-  const addTodo = () => {
+  const addTodo = async () => {
     const trimmed = input.trim();
     if (!trimmed) return;
-    setTodos([...todos, { id: Date.now(), text: trimmed, completed: false }]);
-    setInput("");
+
+    const maxPosition =
+      todos.length > 0 ? Math.max(...todos.map((t) => t.position)) + 1 : 0;
+
+    const { data, error } = await supabase
+      .from("todos")
+      .insert({ text: trimmed, completed: false, position: maxPosition })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Failed to add todo:", error);
+      return;
+    }
+    if (data) {
+      setTodos([...todos, data]);
+      setInput("");
+    }
   };
 
-  const toggleTodo = (id: number) => {
+  const toggleTodo = async (id: number) => {
+    const todo = todos.find((t) => t.id === id);
+    if (!todo) return;
+
+    const { error } = await supabase
+      .from("todos")
+      .update({ completed: !todo.completed })
+      .eq("id", id);
+
+    if (error) {
+      console.error("Failed to toggle todo:", error);
+      return;
+    }
     setTodos(
-      todos.map((todo) =>
-        todo.id === id ? { ...todo, completed: !todo.completed } : todo
-      )
+      todos.map((t) => (t.id === id ? { ...t, completed: !t.completed } : t))
     );
   };
 
-  const deleteTodo = (id: number) => {
-    setTodos(todos.filter((todo) => todo.id !== id));
+  const deleteTodo = async (id: number) => {
+    const { error } = await supabase.from("todos").delete().eq("id", id);
+
+    if (error) {
+      console.error("Failed to delete todo:", error);
+      return;
+    }
+    setTodos(todos.filter((t) => t.id !== id));
   };
 
   // ドラッグ&ドロップ
@@ -79,14 +121,27 @@ export default function Home() {
   );
 
   const handleDrop = useCallback(
-    (index: number) => {
+    async (index: number) => {
       if (dragIndex === null || dragIndex === index) return;
+
       const updated = [...todos];
       const [moved] = updated.splice(dragIndex, 1);
       updated.splice(index, 0, moved);
-      setTodos(updated);
+
+      // position を振り直し
+      const reordered = updated.map((todo, i) => ({ ...todo, position: i }));
+      setTodos(reordered);
       setDragIndex(null);
       setDragOverIndex(null);
+
+      // Supabase に並び順を保存
+      const updates = reordered.map((todo) =>
+        supabase
+          .from("todos")
+          .update({ position: todo.position })
+          .eq("id", todo.id)
+      );
+      await Promise.all(updates);
     },
     [dragIndex, todos]
   );
